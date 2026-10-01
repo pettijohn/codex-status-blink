@@ -52,7 +52,7 @@ This command shows both limits:
 cargo run --release -- --limit both
 ```
 
-With `--limit both`, LED 1 shows the five-hour limit. LED 2 shows the weekly limit. This option needs blink(1) firmware 204 or later.
+With `--limit both`, LED 1 shows the five-hour limit. LED 2 shows the weekly limit. This option needs a blink(1) mk2 or later.
 
 Use `--blink-serial` or `--blink-index` to select a blink(1):
 

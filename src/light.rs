@@ -1,18 +1,18 @@
 use std::time::Duration;
 
-use blink1rs::{Blink1, Color, Error, Led};
+use blink1rs::{Blink1, Color, DeviceKind, Error, Led};
 use thiserror::Error as ThisError;
-
-const PER_LED_MINIMUM_FIRMWARE: u16 = 204;
 
 #[derive(Debug, ThisError)]
 pub enum LightError {
     #[error(transparent)]
     Blink(#[from] Error),
-    #[error(
-        "blink(1) firmware {firmware} cannot address its LEDs separately; --limit both needs firmware {PER_LED_MINIMUM_FIRMWARE} or later"
-    )]
-    PerLedUnsupported { firmware: u16 },
+    #[error("--limit both needs a blink(1) mk2 or later; this device is {kind}")]
+    PerLedUnsupported { kind: DeviceKind },
+}
+
+fn supports_both(kind: DeviceKind) -> bool {
+    matches!(kind, DeviceKind::Mk2 | DeviceKind::Mk3 | DeviceKind::Mk4)
 }
 
 pub struct Light {
@@ -61,10 +61,9 @@ impl Light {
     }
 
     pub fn show_both(&mut self, first: Color, second: Color) -> Result<(), LightError> {
-        if self.firmware < PER_LED_MINIMUM_FIRMWARE {
-            return Err(LightError::PerLedUnsupported {
-                firmware: self.firmware,
-            });
+        let kind = self.device.kind();
+        if !supports_both(kind) {
+            return Err(LightError::PerLedUnsupported { kind });
         }
 
         for (index, color) in [first, second].into_iter().enumerate() {
@@ -79,5 +78,19 @@ impl Light {
 
     pub fn shutdown(&mut self) -> Result<(), Error> {
         self.device.off()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_depends_on_hardware_not_firmware() {
+        assert!(supports_both(DeviceKind::Mk2));
+        assert!(supports_both(DeviceKind::Mk3));
+        assert!(supports_both(DeviceKind::Mk4));
+        assert!(!supports_both(DeviceKind::Mk1));
+        assert!(!supports_both(DeviceKind::Unknown));
     }
 }
