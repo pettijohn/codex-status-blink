@@ -1,0 +1,8 @@
+{
+  "name": "codex-status-blink",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "ubuntu",
+  "updateRemoteUserUID": false
+}
