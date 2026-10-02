@@ -66,6 +66,22 @@ Use `--interval-secs` to change the initial poll interval. Use `--fade-ms 0` to 
 
 The program stops stored blink(1) patterns at startup. It turns the LED off during a normal stop.
 
+## Glidepath mode
+
+Add `--glidepath` to compare the remaining quota with a straight-line glidepath:
+
+```sh
+cargo run --release -- --glidepath --limit both
+```
+
+The expected remaining quota equals the time until reset divided by the window duration, multiplied by 100. The windows are 5 hours and 7 days. The program reads `reset_at_unix` from the JSON output. The expected percentage stays within 0% through 100%.
+
+At or above the glidepath, the LED is green. A deficit of 5 percentage points is yellow. A deficit of 10 percentage points or more is red. The color changes continuously between these thresholds.
+
+Halfway through a window, the expected remaining quota is 50%. A remaining quota of 50% is green, 42.5% is yellow, and 35% is red.
+
+The program recalculates the glidepath at each poll, even if the quota does not change. The poll backoff still depends on the selected remaining percentages. Without `--glidepath`, the original color gradient applies.
+
 ## Test
 
 ```sh

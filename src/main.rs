@@ -7,12 +7,12 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 
 use crate::cli::{Cli, Limit};
-use crate::color::remaining_to_color;
+use crate::color::{expected_remaining, glidepath_to_color, remaining_to_color};
 use crate::light::Light;
 use crate::source::{Usage, read_usage};
 
@@ -48,12 +48,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        match read_usage(cli.limit) {
+        match read_usage(cli.limit, cli.glidepath) {
             Ok(usage) => {
+                let now_unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
                 if let Err(error) = render(
                     light.as_mut().expect("the light is open"),
                     cli.limit,
                     &usage,
+                    cli.glidepath,
+                    now_unix,
                 ) {
                     eprintln!("cannot update blink(1): {error}");
                     if matches!(error, light::LightError::PerLedUnsupported { .. }) {
@@ -69,8 +72,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cli.verbose,
                     format!(
                         "usage remaining: 5h {}, weekly {}",
-                        format_limit_usage(usage.five_hour.as_ref()),
-                        format_limit_usage(usage.weekly.as_ref()),
+                        format_limit_usage(
+                            usage.five_hour.as_ref(),
+                            cli.glidepath,
+                            now_unix,
+                            5 * 60 * 60
+                        ),
+                        format_limit_usage(
+                            usage.weekly.as_ref(),
+                            cli.glidepath,
+                            now_unix,
+                            7 * 24 * 60 * 60
+                        ),
                     ),
                 );
                 delay = if previous_usage == Some(displayed) {
@@ -98,38 +111,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn render(light: &mut Light, limit: Limit, usage: &Usage) -> Result<(), light::LightError> {
+fn render(
+    light: &mut Light,
+    limit: Limit,
+    usage: &Usage,
+    glidepath: bool,
+    now_unix: u64,
+) -> Result<(), light::LightError> {
+    let five_hour = || {
+        quota_color(
+            usage.five_hour.as_ref().expect("source checked 5h"),
+            glidepath,
+            now_unix,
+            5 * 60 * 60,
+        )
+    };
+    let weekly = || {
+        quota_color(
+            usage.weekly.as_ref().expect("source checked weekly"),
+            glidepath,
+            now_unix,
+            7 * 24 * 60 * 60,
+        )
+    };
     match limit {
-        Limit::FiveHour => light.show(remaining_to_color(
-            usage
-                .five_hour
-                .as_ref()
-                .expect("source checked 5h")
-                .remaining,
-        )),
-        Limit::Weekly => light.show(remaining_to_color(
-            usage
-                .weekly
-                .as_ref()
-                .expect("source checked weekly")
-                .remaining,
-        )),
-        Limit::Both => light.show_both(
-            remaining_to_color(
-                usage
-                    .five_hour
-                    .as_ref()
-                    .expect("source checked 5h")
-                    .remaining,
-            ),
-            remaining_to_color(
-                usage
-                    .weekly
-                    .as_ref()
-                    .expect("source checked weekly")
-                    .remaining,
-            ),
-        ),
+        Limit::FiveHour => light.show(five_hour()),
+        Limit::Weekly => light.show(weekly()),
+        Limit::Both => light.show_both(five_hour(), weekly()),
+    }
+}
+
+fn quota_color(
+    usage: &source::LimitUsage,
+    glidepath: bool,
+    now_unix: u64,
+    window_secs: u64,
+) -> blink1rs::Color {
+    if glidepath {
+        let expected = expected_remaining(
+            usage.reset_at_unix.expect("source checked reset timestamp"),
+            now_unix,
+            window_secs,
+        );
+        glidepath_to_color(usage.remaining, expected)
+    } else {
+        remaining_to_color(usage.remaining)
     }
 }
 
@@ -144,10 +170,30 @@ fn displayed_values(limit: Limit, usage: &Usage) -> [Option<u8>; 2] {
     }
 }
 
-fn format_limit_usage(usage: Option<&source::LimitUsage>) -> String {
+fn format_limit_usage(
+    usage: Option<&source::LimitUsage>,
+    glidepath: bool,
+    now_unix: u64,
+    window_secs: u64,
+) -> String {
     usage.map_or_else(
         || "unavailable".to_string(),
-        |usage| format!("{}% resets {}", usage.remaining, usage.resets),
+        |usage| {
+            let metric = if glidepath {
+                usage.reset_at_unix.map_or_else(
+                    || " (glidepath unavailable)".to_string(),
+                    |reset| {
+                        format!(
+                            " (glidepath {:.0}%)",
+                            expected_remaining(reset, now_unix, window_secs)
+                        )
+                    },
+                )
+            } else {
+                String::new()
+            };
+            format!("{}%{metric} resets {}", usage.remaining, usage.resets)
+        },
     )
 }
 
@@ -183,6 +229,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn verbose_glidepath_metrics_preserve_reset_text() {
+        let now = 1800000000;
+        for window in [5 * 60 * 60, 7 * 24 * 60 * 60] {
+            let usage = source::LimitUsage {
+                remaining: 68,
+                resets: "11:20".to_string(),
+                reset_at_unix: Some(now + window * 70 / 100),
+            };
+            assert_eq!(
+                format_limit_usage(Some(&usage), true, now, window),
+                "68% (glidepath 70%) resets 11:20"
+            );
+            assert_eq!(
+                format_limit_usage(Some(&usage), false, now, window),
+                "68% resets 11:20"
+            );
+        }
+        assert_eq!(format_limit_usage(None, true, now, 18000), "unavailable");
+        let usage = source::LimitUsage {
+            remaining: 68,
+            resets: "exact reset text".to_string(),
+            reset_at_unix: None,
+        };
+        assert_eq!(
+            format_limit_usage(Some(&usage), true, now, 18000),
+            "68% (glidepath unavailable) resets exact reset text"
+        );
+    }
+
+    #[test]
+    fn glidepath_recalculates_for_unchanged_quota() {
+        let usage = source::LimitUsage {
+            remaining: 35,
+            resets: "unchanged".to_string(),
+            reset_at_unix: Some(1800000000 + 9000),
+        };
+        assert_eq!(
+            quota_color(&usage, true, 1800000000, 18000),
+            blink1rs::Color::RED
+        );
+        assert_eq!(
+            quota_color(&usage, true, 1800002700, 18000),
+            blink1rs::Color::GREEN
+        );
+        assert_eq!(
+            quota_color(&usage, false, 1800000000, 18000),
+            remaining_to_color(35)
+        );
+    }
+
+    #[test]
     fn backs_off_from_thirty_seconds_to_five_minutes() {
         assert_eq!(
             next_poll_delay(Duration::from_secs(30)),
@@ -212,20 +309,24 @@ mod tests {
             five_hour: Some(source::LimitUsage {
                 remaining: 17,
                 resets: "11:44am".to_string(),
+                reset_at_unix: None,
             }),
             weekly: Some(source::LimitUsage {
                 remaining: 47,
                 resets: "13:51 on 4 Oct".to_string(),
+                reset_at_unix: None,
             }),
         };
         let changed_weekly = Usage {
             five_hour: Some(source::LimitUsage {
                 remaining: 17,
                 resets: "11:44am".to_string(),
+                reset_at_unix: None,
             }),
             weekly: Some(source::LimitUsage {
                 remaining: 46,
                 resets: "13:51 on 4 Oct".to_string(),
+                reset_at_unix: None,
             }),
         };
         assert_eq!(

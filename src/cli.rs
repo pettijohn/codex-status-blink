@@ -26,6 +26,10 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = Limit::FiveHour)]
     pub limit: Limit,
 
+    /// Color usage relative to the straight-line quota glidepath.
+    #[arg(long)]
+    pub glidepath: bool,
+
     /// Set the initial poll interval in seconds.
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..))]
     pub interval_secs: u64,
@@ -50,6 +54,19 @@ mod tests {
         let cli = Cli::try_parse_from(["codex-status-blink"]).unwrap();
         assert_eq!(cli.limit, Limit::FiveHour);
         assert_eq!(cli.interval_secs, 30);
+    }
+
+    #[test]
+    fn parses_glidepath() {
+        let cli =
+            Cli::try_parse_from(["codex-status-blink", "--glidepath", "--limit", "both"]).unwrap();
+        assert!(cli.glidepath);
+        assert_eq!(cli.limit, Limit::Both);
+        assert!(
+            !Cli::try_parse_from(["codex-status-blink"])
+                .unwrap()
+                .glidepath
+        );
     }
 
     #[test]

@@ -17,6 +17,8 @@ pub enum SourceError {
     Json(#[from] serde_json::Error),
     #[error("{COMMAND} returned no {0} limit")]
     MissingLimit(&'static str),
+    #[error("the {0} limit needs reset_at_unix for --glidepath")]
+    MissingReset(&'static str),
     #[error("the {0} limit has remaining_percent {1}, outside the range 0 through 100")]
     InvalidPercent(&'static str, u64),
 }
@@ -25,6 +27,7 @@ pub enum SourceError {
 pub struct LimitUsage {
     pub remaining: u8,
     pub resets: String,
+    pub reset_at_unix: Option<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -48,15 +51,32 @@ struct UsageLimit {
     kind: String,
     remaining_percent: u64,
     resets: String,
+    reset_at_unix: Option<u64>,
 }
 
-pub fn read_usage(limit: Limit) -> Result<Usage, SourceError> {
+pub fn read_usage(limit: Limit, glidepath: bool) -> Result<Usage, SourceError> {
     let output = Command::new(COMMAND).output().map_err(SourceError::Start)?;
     if !output.status.success() {
         return Err(SourceError::Status(output.status));
     }
 
-    extract_usage(&String::from_utf8_lossy(&output.stdout), limit)
+    let usage = extract_usage(&String::from_utf8_lossy(&output.stdout), limit)?;
+    if glidepath {
+        validate_reset_times(&usage, limit)?;
+    }
+    Ok(usage)
+}
+
+fn validate_reset_times(usage: &Usage, limit: Limit) -> Result<(), SourceError> {
+    for (kind, selected, value) in [
+        ("5h", limit != Limit::Weekly, usage.five_hour.as_ref()),
+        ("weekly", limit != Limit::FiveHour, usage.weekly.as_ref()),
+    ] {
+        if selected && value.and_then(|usage| usage.reset_at_unix).is_none() {
+            return Err(SourceError::MissingReset(kind));
+        }
+    }
+    Ok(())
 }
 
 pub fn extract_usage(json: &str, selection: Limit) -> Result<Usage, SourceError> {
@@ -70,12 +90,14 @@ pub fn extract_usage(json: &str, selection: Limit) -> Result<Usage, SourceError>
                 five_hour = Some(LimitUsage {
                     remaining: percent("5h", usage_limit.remaining_percent)?,
                     resets: usage_limit.resets,
+                    reset_at_unix: usage_limit.reset_at_unix,
                 });
             }
             "weekly" if weekly.is_none() => {
                 weekly = Some(LimitUsage {
                     remaining: percent("weekly", usage_limit.remaining_percent)?,
                     resets: usage_limit.resets,
+                    reset_at_unix: usage_limit.reset_at_unix,
                 });
             }
             _ => {}
@@ -123,10 +145,12 @@ mod tests {
                 five_hour: Some(LimitUsage {
                     remaining: 17,
                     resets: "11:44am".to_string(),
+                    reset_at_unix: None,
                 }),
                 weekly: Some(LimitUsage {
                     remaining: 47,
                     resets: "13:51 on 4 Oct".to_string(),
+                    reset_at_unix: None,
                 }),
             }
         );
@@ -136,13 +160,32 @@ mod tests {
                 five_hour: Some(LimitUsage {
                     remaining: 17,
                     resets: "11:44am".to_string(),
+                    reset_at_unix: None,
                 }),
                 weekly: Some(LimitUsage {
                     remaining: 47,
                     resets: "13:51 on 4 Oct".to_string(),
+                    reset_at_unix: None,
                 }),
             }
         );
+    }
+
+    #[test]
+    fn glidepath_requires_selected_reset_times() {
+        let usage = extract_usage(VALID, Limit::Both).unwrap();
+        assert!(matches!(
+            validate_reset_times(&usage, Limit::Both),
+            Err(SourceError::MissingReset("5h"))
+        ));
+        let json = r#"{"buckets":[{"limits":[{"kind":"5h","remaining_percent":50,"resets":"exact text","reset_at_unix":1800000000}]}]}"#;
+        let usage = extract_usage(json, Limit::FiveHour).unwrap();
+        assert_eq!(
+            usage.five_hour.as_ref().unwrap().reset_at_unix,
+            Some(1800000000)
+        );
+        assert!(validate_reset_times(&usage, Limit::FiveHour).is_ok());
+        assert!(validate_reset_times(&usage, Limit::Both).is_err());
     }
 
     #[test]
